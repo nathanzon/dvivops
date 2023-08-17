@@ -1,0 +1,116 @@
+/****
+CI/CD pipeline to build and deploy the Coffee Shop Application
+--------------------------------------------------------------
+
+****/
+
+
+node {
+	//Concurrent builds are not allowed in this pipeline due to possible conflicts
+    properties([
+        buildDiscarder(
+                logRotator(
+                        artifactDaysToKeepStr: '1', 
+                        artifactNumToKeepStr: '3', 
+                        daysToKeepStr: '', 
+                        numToKeepStr: '')
+        ), 
+        disableConcurrentBuilds()
+		])
+    try { //Catch exceptions of the failed builds
+    
+    stage('Fetching git') { 
+        // Get some code from the GitLab repository
+	withCredentials([string(credentialsId: 'git', variable: 'git_token')]) {
+        git branch: "main", url:"https://${git_token}@github.com/nathanzon/infinitylabs.git"
+	}
+    }
+    stage('Check AWS EKS server connection') {
+    withCredentials([aws(credentialsId: 'aws', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')])
+    {
+	sh "echo Checking AWS credentials and updating kubectl:"
+	sh "aws sts get-caller-identity"
+	sh "aws eks update-kubeconfig --name yuriy-eks --region us-east-1"
+    }
+
+    }
+    stage('Docker image build'){
+        sh "docker build -t coffeeshop ."
+    }
+
+    stage('Run Docker container'){
+    
+        sh "docker run -d -p 5000:5000 --rm --name coffeeshop coffeeshop:latest"
+        
+    }
+
+    stage('Upload image to DockerHub') {
+        sh "docker login -u natanzon -p ${dockerhub_token}"
+        sh "docker tag coffeeshop:latest natanzon/coffeeshop:latest"
+        def now = new Date()
+	/*create a new image version according to yymm.dd.hhmm format
+	  tag it and push to DockerHub. Also tag the new image the 'latest' mark
+	*/
+        version = now.format("yyMM.dd.HHmm", TimeZone.getTimeZone('UTC+2'))
+        sh "docker tag natanzon/coffeeshop:latest natanzon/coffeeshop:${version}"
+        sh "docker push natanzon/coffeeshop:latest"
+        sh "docker push natanzon/coffeeshop:${version}"
+    }
+
+    stage('Cleaning up containers'){
+        sh "docker ps; docker stop coffeeshop"
+            }
+    stage('Deploying to AWS EKS cluster'){
+	sh '''#!/bin/bash
+	    #source aws-kube-config.sh
+	    kubectl apply -f deploy_k8s.yml //First deployment
+	    kubectl set image deployment/coffeeshop coffeeshop=natanzon/coffeeshop:${version}
+	    '''
+	    }
+    stage('Running unit tests') {
+        sh '''#!/bin/bash
+	    pip install pytest flask
+            #source aws-kube-config.sh
+	    python3 -m pytest tests_site_reachable.py
+	    kubectl cluster-info
+	    '''
+    }
+
+    stage('Successful build notification'){
+    	/*if all the previous stages were finished successfully, the following line
+    	  sends the Slack notification to #succeeded-build channel
+    	*/
+    	NotifySlack("succeeded-build", "The pipeline is finished successfully")
+    	}
+    
+    }    
+    catch(build_failed){   
+        /*
+         If one of the stages failed, exception is caught here, and Slack notification
+         is sent to #devops-alerts channel
+        */ 	
+    	NotifySlack("devops-alerts", "Achtung! Jenkins pipeline failed! Check the console output for details. ${build_failed}")
+    	throw build_failed
+    }
+    finally{
+         echo "The pipeline has finished its execution"       
+    }
+    
+}
+
+def NotifySlack(channel="weatherapp", message="Pipeline is being executed") 
+{
+	/*
+	 This function sends a message to Slack as JenkinsBot user
+	Allowed channels: devops-alerts, succeeded-build, weatherapp
+	If any other channel is selected, no message will be sent
+	*/
+	withCredentials([string(credentialsId: 'slack', variable: 'slack_token')]) {
+	sh """#!/bin/bash
+	    #source aws-kube-config.sh
+	    CLUSTER_IP=`kubectl describe service coffeeshop | grep Ingress | awk '{print \$3}'`
+	    echo 'Application deployed at http://\$CLUSTER_IP:80'
+	    curl -X POST -F channel=${channel} -F text='${message}' https://slack.com/api/chat.postMessage -H 'Authorization: Bearer ${slack_token}'
+	    """
+	}
+}

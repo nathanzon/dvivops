@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coffeeshop
+  labels:
+    app: coffeeshop
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: coffeeshop
+  strategy: 
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: coffeeshop
+    spec:
+      containers:
+      - name: coffeeshop
+        image: natanzon/coffeeshop:latest
+        ports:
+        - containerPort: 5000
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: coffeeshop-service
+spec:
+  selector:
+    app: coffeeshop
+  ports:
+  - port: 5000
+    targetPort: 80
+  type: LoadBalancer
